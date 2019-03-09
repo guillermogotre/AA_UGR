@@ -1,0 +1,230 @@
+---
+title: |
+  | Aprendizaje Automático  
+  | Trabajo final
+  
+author: "Guillermo Gómez Trenado"
+date: "June 4, 2018"
+bibliography: biblio.bib
+output: 
+  pdf_document:
+    toc: true
+    number_sections: true
+geometry: margin=1.5in
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(cache=TRUE)
+
+set.seed(123)
+
+library(AppliedPredictiveModeling)
+transparentTheme(trans = .4)
+library(caret)
+library(doMC)
+registerDoMC(cores = 4)
+```
+
+# Clasificación de dígitos manuscritos
+
+Nos enfrentamos al problema de clasificación de dígitos manuscritos con tres modelos, uno lineal y dos no lineales. He separado el trabajo en distintos apartados que parcelan cada una de las etapas del análisis y la construcción del modelo.
+
+## Observación y comprensión de los datos
+
+Vamos a cargar los datos para poder analizarlos respetando en todo momento el conjunto de test para no contaminar la evaluación.
+
+```{r}
+dtrain = read.csv("data/pendigits.tra",header = FALSE)
+dtest = read.csv("data/pendigits.tes",header = FALSE)
+dtrain[,ncol(dtrain)]= factor(dtrain[,ncol(dtrain)])
+dtest[,ncol(dtest)] = factor(dtest[,ncol(dtest)])
+dtrainX = dtrain[,1:(ncol(dtrain)-1)]
+dtrainY = dtrain[,ncol(dtrain)]
+dtestX = dtest[,1:(ncol(dtest)-1)]
+dtestY = dtest[,ncol(dtest)]
+paste("[Train] Número de muestras: ",nrow(dtrain))
+paste("[Test] Número de muestras: ",nrow(dtest))
+```
+
+Tenemos ante nosotros 10992 muestras de dígitos manuscritos representados como una sucesión de 8 coordenadas cartesianas enteras en un plano acotado entre 0 y 100 en ambos ejes. Los valores se han normalizado entre 0 y 100 estirando los valores vertical y horizontalmente, por lo general sólo horizontalmente pues los números suelen ser más altos que anchos.
+
+La muestra está ya separada en dos conjuntos, uno de entrenamiento y otro de test, lo interesante de esta separación es que encontramos 250 muestras por cada escritor, 44 escritores en el conjunto de entrenamiento y 14 distintos para el test. Lo que estamos evaluando en definitiva es si podemos extraer características suficientes de un conjunto reducido de escritores para predecir los dígitos de escritores no conocidos.
+
+Vamos a visualizar alguno de las muestras de entrenamiento para hacernos una mejor idea.
+
+```{r, out.width='.49\\linewidth', fig.width=2, fig.height=3, fig.show='hold',fig.align='center'}
+paintNumber = function(r,c){
+  xp = unlist(r[seq(1,length.out = 8, by = 2)])
+  yp = unlist(r[seq(2,length.out = 8, by = 2)])
+  plot(x = xp,y= yp,type="l",main = c, xlab = "", ylab = "")
+}
+
+for(i in 0:9){
+    paintNumber(dtrainX[dtrainY == i,][1,],i)
+}
+
+```
+
+Y los valores medios
+
+```{r, out.width='.49\\linewidth', fig.width=2, fig.height=3, fig.show='hold',fig.align='center'}
+for(i in 0:9){
+    paintNumber(apply(dtrainX[dtrainY == i,],c(2),mean),i)
+}
+```
+
+Se aprecia de forma inmediata cómo parece que hay clases que serán más fáciles de clasificar por métodos lineales como el 2 o el 4, donde el valor medio conserva características representativas de la clase mientras que otros seguramente necesitarán modelos no lineales que generen abstracciones sobre la relación entre distintas características y puedan separar el espacio de decisión en fronteras no lineales.
+
+## Preprocesado de los datos
+
+La única transformación que vamos a aplicar a los datos, pues la reducción de características a priori no parece necesaria ---más aún con sólo 16 características--- es normalizar los valores entre -1 y 1.
+
+```{r}
+ndtrainX = apply(dtrainX, c(2), function(c){c/50-1})
+ndtestX = apply(dtestX, c(2), function(c){c/50-1})
+```
+
+## Definición de conjuntos de training, validación y test
+
+En este problema el conjunto de train y test está ya acertadamente separado en dos conjuntos distintos primando la independencia entre los dos conjuntos con número equilibrado de representación de cada clase en cada subconjunto, unas 750 muestras por clase en el conjunto de entrenamiento y unas 350 en el test.
+
+Para la validación vamos a utilizar validación cruzada 5-fold que nos permitirá por un lado el cálculo de los hiperparámetros de cada uno de los modelos elegidos y por otro lado comparar los métodos entre ellos en base a una medida de error que será el número de clasificaciones incorrectas.
+
+## Definición de modelos a usar y estimación de hiperparámetros
+
+Vamos a usar tres modelos distintos, un modelo lineal que será SVM con un kernel lineal, y dos modelos no lineales, SVM con kernel RBF y una red neuronal. Se trata de SVM con soft-margin así que tenemos que definir el parámetro de coste de clasificación incorrecta, resultando esta decisión en el equilibrio entre máximo margen y clasificiaciones incorrectas.
+
+```{r}
+tC = trainControl(method="cv",number=5)
+```
+
+
+### SVM con kernel lineal
+
+```{r}
+svmLGrid = expand.grid(C=seq(0.25,1.75,by = 0.25))
+svmLRes = train(x=ndtrainX,y=dtrainY,method="svmLinear",trControl = tC, 
+                tuneGrid = svmLGrid)
+
+gtThan = svmLRes$results$Accuracy > 0.5
+
+plot(svmLRes)
+paste("Mejor coste: ", svmLRes$bestTune)
+paste("Precisión: ", svmLRes$results[svmLRes$results$C == 
+                                       svmLRes$bestTune[[1]],]$Accuracy)
+
+svmLTune = svmLRes$bestTune
+```
+
+Por lo que he podido comprobar el mejor coste depende altamente de la aleatoriedad de la selección de los subconjuntos para **5-fold CV** y cualquier valor entre 1 y 1.5 da los mejores resultados, para el kernel RBF fijaremos el coste a 1 para poder invertir la capacidad de cómputo en el cálculo del sigma más ajustado.
+
+### SVM con kernel RBF
+
+Usamos SVM con el kernel **radial basis function** [ver @kernlab] cuyo parámetro configurable es el coste y $\sigma$ en:
+
+\[K(\mathbf{x},\mathbf{x'})=exp\left ( -\frac{\left \| \mathbf{x},\mathbf{x'}  \right \|^2}{2\sigma^2} \right )\]
+
+```{r, warning = FALSE}
+svmRBFGrid = expand.grid(C=1,sigma=seq(0.1,1,by = 0.9/6))
+svmRBFRes = train(x=ndtrainX,y=dtrainY,method = "svmRadial", 
+                  trControl = tC, tuneGrid = svmRBFGrid)
+```
+
+```{r, warning = FALSE}
+gtThan = svmRBFRes$results$Accuracy > 0.5
+plot(svmRBFRes)
+paste("Mejor sigma: ", toString(svmRBFRes$bestTune$sigma))
+paste("Precisión: ", svmRBFRes$results[svmRBFRes$results$sigma == 
+                                         svmRBFRes$bestTune$sigma,]$Accuracy)
+
+svmRBFTune = svmRBFRes$bestTune
+```
+
+### Neural network
+
+Usamos el perceptrón multicapa con backpropagation, [ver @RSNNS]. He observado con experimentaciones paralelas que el uso de **weight decay** no mejora el resultado en CV y sólo ralentiza el aprendizaje, probablemente por el reducido número de iteraciones que trabajamos en ordenadores personales. Por otro lado, la configuración de parámetros que mejores resultados da para backpropagation estándar [ver @SNNS] es $\eta=0.9$ y $d_{max}=0.3$, éste último es el umbral mínimo de salida para propagar un resultado, lo cual previene el sobreentrenamiento. Por otro lado he probado con incrementar el número de iteraciones pero no consigue mejorar el resultado.
+
+```{r, warning = FALSE}
+nodes_c = floor(seq(0,by = 50/3,length.out = 4))
+nnGrid = expand.grid(layer1=nodes_c,layer2=nodes_c,layer3=nodes_c)
+nnRes = train(x=ndtrainX,y=dtrainY,method = "mlpML", trControl = tC, 
+              tuneGrid = nnGrid, learnFunc = "Std_Backpropagation", 
+              learnFuncParams = c(0.9,0.3), maxit = 100)
+nnTune = nnRes$bestTune
+```
+
+```{r, warning = FALSE}
+nnRes
+plot(nnRes)
+```
+
+Por lo que observamos el uso de más de una capa no mejora el error en la validación.
+
+### Reflexión sobre los resultados
+
+Hemos planteado tres modelos, cada uno con suficiente reputación experimental en distintos campos y los resultados son interesantes. En primer lugar SVM con el kernel lineal ha conseguido dar resultados competitivos, a lo largo de las distintas ejecuciones que he realizado suele dar un valor sobre 0.985. Por otro lado SVM con kernel RBF y NN dan resultados prácticamente idénticos, con la mejor configuración de ambos el límite experimental en la capacidad de clasificación suele estar entre 0.995 y 0.996.
+
+El problema surge al tener decidir sobre qué modelo elegir, aunque los dos contendientes son claros, SVM-RBF o NN. Lo analizo atendiendo a las particularidades del problema en el siguiente punto.
+
+## Selección y ajuste del modelo final
+
+El primer problema que tenemos que atajar es la función que intentamos aprender, la dificultad radica en que estamos hipotetizando que seremos capaces de adivinar la escritura de individuos desconocidos en base a la escritura de individuos conocidos suficientemente grande, sin embargo, para el entrenamiento con **5-fold CV** estamos aprendiendo la escritura de los mismos individuos que intentamos clasificar posteriormente, estimar el comportamiento en $E_{test}$ ---y consecuentemente en $E_{out}$--- a partir del error en la validación es osado y no tenemos garantías teóricas de que esto suceda, tampoco tenemos en los datos del train la información sobre a qué usuario pertenece un dígito para hacer CV sobre distintos usuarios entrenando con unos y estimando con otros.
+
+Por otro lado, y aún en relación a la función de clasificación que estamos aprendiendo, y como se infiere de lo expuesto anteriormente no tenemos garantías para definir la muestra como independiente e idénticamente distribuida sobre una distribución de probabilidad desconocida ---y tenemos motivos de sobra para sospechar que no es así---. Por esto no podemos utilizar la dimensión de **Vapnik-Chervonenkis** para hacer una estimación de error fuera de la muestra con la desigualdad de **Hoeffding**. Aún así analicemos la dimensión VC para cada uno de los modelos, para cruzar los dedos y esperar que nos pueda decir algo sobre la capacidad de generalización.
+
+El principal problema entre los dos modelos respecto a la dimensionalidad es el siguiente, mientras que teóricamente ---lo siguiente no es cierto para la representación de números con coma flotante en ordenadores de $n$bits--- la $d_{VC}$ de NN es finita limitada para la función de activación sigmoide por $O(|E|^2·|V|^2)$, la $d_{VC}$ para SVM-RBF es infinita, aunque está limitada por $\left \lceil \frac{4R^2}{\gamma^2} \right \rceil$, siendo $R$ el radio de la mínima hiperesfera que incluye todos los puntos de la muestra y $\gamma$ el márgen de la frontera, esto quiere decir que para márgenes altos del SVM la complejidad de la clase es pequeña y consecuente la generalización es buena.
+
+Con todo lo anterior dicho, y abandonando el respaldo teórico pues no podemos extraer garantías estadísticas sobre la esperanza de error fuera de la muestra tenemos que atenernos a los resultados experimentales de otros autores sobre este problema y problemas similares. 
+
+Versiones más refinadas de ambos modelos ---CNN[ver @620583] y SVM-RBF[ver @6424367]--- han conseguido muy buenos resultados en la versión por píxeles de este problema ---dejando a un lado versiones refinadas del KNN que consiguen muy buenos resultados aunque con una huella de computo y memoria enorme---, aunque SVM aparentemente mejores, por esto, por el resultado ligeramente superior sobre **5-fold CV** y por la reconocida capacidad de generalización de este modelo para $\gamma$ altos ---si es que es posible generalizar, que no lo sabemos--- vamos a elegir el SVM con el kernel radial para ajustar el modelo y ver qué tal lo hace. 
+
+```{r, warning=FALSE}
+tr = train(x = ndtrainX, y = dtrainY, method = "svmRadial", 
+           trControl = trainControl(method = "none"), 
+           tuneGrid =  svmRBFTune)
+```
+
+```{r}
+pred = predict(tr,ndtestX)
+etest = length(which(pred != dtestY))/nrow(ndtestX)
+paste("Error sobre el test: ", etest)
+paste("Tasa de aciertos: ", 1-etest)
+```
+
+Luego analizaremos este resultado, vamos a ver ahora, sólo por curiosidad, qué habría pasado si hubieramos elegido la red neuronal, antes de nada hay que advertir, que si en este paso el resultado de NN fuera significativamente mejor no podríamos elegirla de todos modos, pues no podemos ajustar el modelo basándonos en el test, tendríamos que conseguir nuevos datos y repetir el experimento sobre la red neuronal para comprobar la validez del resultado. Aun así puede ser interesante ver qué sucede.
+
+```{r, warning=FALSE}
+trnn = train(x = ndtrainX, y = dtrainY, method = "mlpML", 
+             trControl = trainControl(method = "none"), 
+             tuneGrid =  nnTune, maxit=100)
+```
+
+```{r}
+prednn = predict(trnn,ndtestX)
+etestnn = length(which(prednn != dtestY))/nrow(ndtestX)
+paste("Error sobre el test: ", etestnn)
+paste("Tasa de aciertos: ", 1-etestnn)
+```
+
+Aunque esto no sirva de nada parece que este resultado aislado apoya nuestra decisión.
+
+## Idoneidad de la métrica y estimación del error fuera de la muestra
+
+```{r}
+confusionMatrix(pred,dtestY)
+```
+
+Sobre el ajuste del modelo podemos observar que la especificidad es aparentemente muy buena, siendo capaz de discriminar con éxito los casos negativos y por otro lado, la sensibilidad depende más de la clase concreta. El mayor motivo de error parece el 1 y el 7 ---parece razonable--- y el 8 y el 0, que mientras parecía razonable en el problema basado en píxeles en éste me ha sorprendido, especialmente porque al dibujar los números ---tanto el ejemplo como el centroide de la clase--- parecían distinguirse exitosamente, sin embargo, las transformaciones no lineales que realizar el kérnel RBF no nos permiten ver a qué se debe esta situación.
+
+La calidad del modelo ajustado depende de la terea destino de éste, y los resultados son similares a los obtenidos por Alpaydin y Alimoglu [ver -@penbased]  aplicando el KNN; sin embargo el SVM-RBF una vez entrenado es mucho más rápido y la huella de memoria es mucho menor, sin embargo añadir más datos supone el entrenamiento completo del modelo otra vez, no como el KNN que por su funcionamiento puede consumir más datos y dar mejores resultados sin tener que pasar por una etapa de entrenamiento
+
+## Conclusiones
+
+Nos hemos enfrentado a un problema sobre el que no teníamos garantías de generalización y experimentalmente hemos conseguido obtener un resultado satisfactorio ---al menos en la similitud del error en la validación con el del test---. No hemos conseguido aparentemente mejorar al KNN pero tenemos un modelo mucho más eficiente para la misma tarea.
+
+Por lo que he podido leer, se está avanzando en el uso de CNN y combinaciones de varias NN más sencillas para resolver el problema con éxito ---la versión con píxeles---, pero sin embargo en mi experimentación no conseguí encontrar indicios que apoyaran el uso del MLP, es posible que sea debido a que el ajuste de los parámetros del MLP es una tarea computacionalmente más exigente que el cálculo de los parámetros de un SVM con la misma precisión, sencillamente porque el entrenamiento consume más tiempo con iteracione suficientes y porque son más parámetros.
+
+Queda pendiente afinar aún más los parámetros del SVM para poder quizás rascar unas centésimas al error y para el futuro experimentar con la red neuronal con **weigth-decay** y con inercia, con suficiente tiempo y capacidad de computación para ajustar los parámetros y ver si consigo mejorar el resultado, también creo que debido a que es un problema con tan pocas características de entrada ---sólo 16 variables--- el uso de muchas capas ocultas no está justificado, pues una sóla capa suficientemente grande debería ser capaz de ajustar la función con la mejor de sus capacidades.
+
+# Bibliografía
